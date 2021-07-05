@@ -5,7 +5,7 @@ When a CLI is registered, this plugin augments its functionality so it supports 
 or to dynamic expressions evaluated in Python.
 
 To expand Python expressions dynamically, encapsulate the string in ${expression}$.
-All expressions should resolve to a string.
+All expressions should resolve to a string (i.e. have a __str__ magic method).
 
 (c) Elias Bachaalany <elias.bachaalany@gmail.com>
 */
@@ -15,12 +15,20 @@ All expressions should resolve to a string.
 #include <algorithm>
 #include <regex>
 #include <functional>
+
+#ifdef _MSC_VER
+    #pragma warning(push)
+    #pragma warning(disable: 4267 4244)
+#endif
 #include <ida.hpp>
 #include <loader.hpp>
 #include <kernwin.hpp>
 #include <expr.hpp>
 #include <registry.hpp>
 #include <diskio.hpp>
+#ifdef _MSC_VER
+    #pragma warning(pop)
+#endif
 
 #include "utils_impl.cpp"
 
@@ -52,20 +60,31 @@ typedef qvector<macro_def_t> macros_t;
 // Default macros
 static macro_def_t DEFAULT_MACROS[] =
 {
-    {"$!",    "${'0x%x' % idc.here()}$",                            "Current cursor location (0x...)"},
-    {"$!!",   "${'%x' % idc.here()}$",                              "Current cursor location"},
-    {"$[",    "${'0x%x' % idc.SelStart()}$",                        "Selection start (0x...)"},
-    {"$[[",   "${'%x' % idc.SelStart()}$",                          "Selection start"},
-    {"$@b",   "${'0x%x' % idc.Byte(idc.here())}$",                  "Byte value at current cursor location (0x...)" },
-    {"$@B",   "${'%x' % idc.Byte(idc.here())}$",                    "Byte value at current cursor location"},
-    {"$@d",   "${'0x%x' % idc.Dword(idc.here())}$",                 "Dword value at current cursor location (0x...)"},
-    {"$@D",   "${'%x' % idc.Dword(idc.here())}$",                   "Dword value at current cursor location"},
-    {"$@q",   "${'0x%x' % idc.Qword(idc.here())}$",                 "Qword value at current cursor location (0x...)"},
-    {"$@Q",   "${'%x' % idc.Qword(idc.here())}$",                   "Qword value at current cursor location"},
-    {"$]]",   "${'%x' % idc.SelEnd()}$",                            "Selection end"},
-    {"$]",    "${'0x%x' % idc.SelEnd()}$",                          "Selection end (0x...)"},
-    {"$#",    "${'0x%x' % (idc.SelEnd() - idc.SelStart())}$",       "Selection size (0x...)"},
-    {"$##",   "${'%x' % (idc.SelEnd() - idc.SelStart())}$",         "Selection size"}
+    {"$!",    "${'0x%x' % idc.here()}$",                                              "Current cursor location (0x...)"},
+    {"$!!",   "${'%x' % idc.here()}$",                                                "Current cursor location"},
+    {"$<",    "${'0x%x' % idc.get_segm_start(idc.here())}$",                          "Current segment start (0x...)"},
+    {"$>",    "${'0x%x' % idc.get_segm_end(idc.here())}$",                            "Current segment end (0x...)"},
+    {"$<<",   "${'%x' % idc.get_segm_start(idc.here())}$",                            "Current segment start"},
+    {"$>>",   "${'%x' % idc.get_segm_end(idc.here())}$",                              "Current segment end"},
+    {"$@b",   "${'0x%x' % idc.get_wide_byte(idc.here())}$",                           "Byte value at current cursor location (0x...)" },
+    {"$@B",   "${'%x' % idc.get_wide_byte(idc.here())}$",                             "Byte value at current cursor location"},
+    {"$@d",   "${'0x%x' % idc.get_wide_dword(idc.here())}$",                          "Dword value at current cursor location (0x...)"},
+    {"$@D",   "${'%x' % idc.get_wide_dword(idc.here())}$",                            "Dword value at current cursor location"},
+    {"$@q",   "${'0x%x' % idc.get_qword(idc.here())}$",                               "Qword value at current cursor location (0x...)"},
+    {"$@Q",   "${'%x' % idc.get_qword(idc.here())}$",                                 "Qword value at current cursor location"},
+    {"$*b",   "${'0x%x' % idc.read_dbg_byte(idc.here())}$",                           "Debugger byte value at current cursor location (0x...)" },
+    {"$*B",   "${'%x' % idc.read_dbg_byte(idc.here())}$",                             "Debugger byte value at current cursor location"},
+    {"$*d",   "${'0x%x' % idc.read_dbg_dword(idc.here())}$",                          "Debugger dword value at current cursor location (0x...)"},
+    {"$*D",   "${'%x' % idc.read_dbg_dword(idc.here())}$",                            "Debugger dword value at current cursor location"},
+    {"$*q",   "${'0x%x' % idc.read_dbg_qword(idc.here())}$",                          "Debugger qword value at current cursor location (0x...)"},
+    {"$*Q",   "${'%x' % idc.read_dbg_qword(idc.here())}$",                            "Debugger qword value at current cursor location"},
+    {"$[",    "${'0x%x' % idc.read_selection_start()}$",                              "Selection start (0x...)"},
+    {"$]",    "${'0x%x' % idc.read_selection_end()}$",                                "Selection end (0x...)"},
+    {"$[[",   "${'%x' % idc.read_selection_start()}$",                                "Selection start"},
+    {"$]]",   "${'%x' % idc.read_selection_end()}$",                                  "Selection end"},
+    {"$#",    "${'0x%x' % (idc.read_selection_end() - idc.read_selection_start())}$", "Selection size (0x...)"},
+    {"$##",   "${'%x' % (idc.read_selection_end() - idc.read_selection_start())}$",   "Selection size"},
+    {"$cls",  "${idaapi.msg_clear()}$",                                               "Clears the output window"}
 };
 
 //-------------------------------------------------------------------------
@@ -92,22 +111,31 @@ struct cli_ctx_t
     cli_t new_cli;
 };
 
-#define MAX_CTX 17
+#define MAX_CTX 18
 static cli_ctx_t g_cli_ctx[MAX_CTX] = {};
 
-template <class _> struct execute_line_with_ctx_gen_t;
-template <size_t... indices> struct execute_line_with_ctx_gen_t<std::index_sequence<indices...>>
-{
-    template <size_t n>
-    static bool idaapi execute_line(const char *line)
-    {
-        std::string repl = macro_replacer(line);
-        return g_cli_ctx[n].old_cli->execute_line(repl.c_str());
-    }
-    static constexpr bool (idaapi *callbacks[])(const char *) = { execute_line<indices>... };
-};
+//-------------------------------------------------------------------------
+// Mechanism to create cli->execute_line() callback with user data
+#define DEF_HOOK(n) execute_line_with_ctx_##n
+#define IMPL_HOOK(n) \
+    static bool idaapi execute_line_with_ctx_##n(const char *line) \
+    { \
+        std::string repl = macro_replacer(line); \
+        return g_cli_ctx[n].old_cli->execute_line(repl.c_str()); \
+    } 
 
-auto g_cli_execute_line_with_ctx = execute_line_with_ctx_gen_t<std::make_index_sequence<MAX_CTX>>::callbacks;
+IMPL_HOOK(0);  IMPL_HOOK(1);  IMPL_HOOK(2);  IMPL_HOOK(3);  IMPL_HOOK(4);  IMPL_HOOK(5);
+IMPL_HOOK(6);  IMPL_HOOK(7);  IMPL_HOOK(8);  IMPL_HOOK(9);  IMPL_HOOK(10); IMPL_HOOK(11);
+IMPL_HOOK(12); IMPL_HOOK(13); IMPL_HOOK(14); IMPL_HOOK(15); IMPL_HOOK(16); IMPL_HOOK(17);
+
+static bool (idaapi *g_cli_execute_line_with_ctx[MAX_CTX])(const char *) =
+{
+    DEF_HOOK(0),  DEF_HOOK(1),  DEF_HOOK(2),  DEF_HOOK(3),  DEF_HOOK(4),  DEF_HOOK(5),
+    DEF_HOOK(6),  DEF_HOOK(7),  DEF_HOOK(8),  DEF_HOOK(9),  DEF_HOOK(10), DEF_HOOK(11),
+    DEF_HOOK(12), DEF_HOOK(13), DEF_HOOK(14), DEF_HOOK(15), DEF_HOOK(16), DEF_HOOK(17)
+};
+#undef DEF_HOOK
+#undef IMPL_HOOK
 
 // Ignore UI hooks when set
 bool g_b_ignore_ui_notification = false;
@@ -157,7 +185,7 @@ static ssize_t idaapi ui_callback(void *, int notification_code, va_list va)
                 break;
 
             auto cli     = va_arg(va, const cli_t *);
-            auto install = va_arg(va, bool);
+            auto install = bool(va_arg(va, int));
 
             auto hooked_cli = install ? hook_cli(cli) : unhook_cli(cli);
             if (hooked_cli != nullptr)
@@ -179,11 +207,9 @@ static ssize_t idaapi ui_callback(void *, int notification_code, va_list va)
 struct macro_editor_t: public chooser_t
 {
 protected:
-    static constexpr uint32 flags_ = CH_MODAL | CH_KEEP |
-        CH_CAN_DEL | CH_CAN_EDIT | CH_CAN_INS | CH_CAN_REFRESH;
-
-    static constexpr int widths_[3]         = { 10, 30, 70 };
-    static constexpr char *const header_[3] = { "Macro", "Expression", "Description" };
+    static const uint32 flags_;
+    static const int widths_[];
+    static const char *const header_[];
 
     macros_t m_macros;
 
@@ -321,10 +347,7 @@ protected:
     }
 
 public:
-    macro_editor_t(const char *title_ = "CLI macros editor")
-        : chooser_t(flags_, qnumber(widths_), widths_, header_, title_)
-    {
-    }
+    macro_editor_t(const char *title_);
 
     // Rebuilds the macros list
     void build_macros_list()
@@ -381,11 +404,24 @@ public:
     }
 };
 
+const uint32 macro_editor_t::flags_ = CH_MODAL | CH_KEEP | CH_CAN_DEL | CH_CAN_EDIT | CH_CAN_INS | CH_CAN_REFRESH;
+
+const int macro_editor_t::widths_[3]         = { 10, 30, 70 };
+const char *const macro_editor_t::header_[3] = { "Macro", "Expression", "Description" };
+
+inline macro_editor_t::macro_editor_t(const char *title_ = "CLI macros editor")
+        : chooser_t(flags_, qnumber(widths_), widths_, header_, title_)
+{
+}
+
 macro_editor_t g_macro_editor;
 
 //--------------------------------------------------------------------------
-int idaapi init(void)
+plugmod_t *idaapi init(void)
 {
+    if (!is_idaq())
+        return PLUGIN_SKIP;
+
     msg("IDA Command Line Interface macros initialized\n");
 
     hook_to_notification_point(HT_UI, ui_callback);
